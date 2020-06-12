@@ -1,0 +1,12 @@
+### Code Style ###
+.checkstyle
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### Visual Studio Code ###
+.vscode
+
