@@ -203,10 +203,15 @@ def writeFVideoFromImage(videofilepath, imagefilepath, duration, framerate, *dri
     for i in range(framecount):
         thisI = I
         for j in range(len(driveFilters)):
+            thisOldI = thisI
             thatDrive = driveFilters[j][0]
             thatFilter = driveFilters[j][1]
+            isMasked = len(driveFilters[j])>2
             thatF = thatDrive[i]
             thisI = thatFilter(thisI,thatF)
+            if isMasked:
+                thatMask = driveFilters[j][2]
+                thisI = cv2.bitwise_and(thisI,thatMask) + cv2.bitwise_and(thisOldI,cv2.bitwise_not(thatMask)) 
         video.write(thisI)
     video.release()
     return 0
