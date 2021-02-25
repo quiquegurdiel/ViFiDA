@@ -1,6 +1,5 @@
 ************************************************
-**ViFiDA**
-**Video filtering driven by audio**
+***ViFiDA*** - **Video filtering driven by audio**
 ************************************************
 
 1. Clone the repository to <YourFolder>
