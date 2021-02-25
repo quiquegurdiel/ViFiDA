@@ -63,7 +63,41 @@ def normalizeClippedInterval(vector, interval='auto', k=2, thres=30) :
     return vector
 
 #filters F
-def saturationF(img, f) :
+def contrastValueF(img, f, amp=100, ori=-50) :
+    img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
+
+    #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
+    value = f*amp+ori
+
+    #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
+    factor = (259*(value+255))/(255*(259-value))
+
+    aux = img[:,:,2].astype("double")
+    aux = factor*(aux-128) + 128
+    aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
+    img[:,:,2] = aux.astype('uint8')
+
+    img = cv2.cvtColor(img,cv2.COLOR_HSV2BGR)
+
+    return img
+
+def contrastF(img, f, amp=140, ori=-40) :
+    #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
+    value = f*amp+ori
+
+    #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
+    factor = (259*(value+255))/(255*(259-value))
+
+    aux = img.astype("double")
+    aux = factor*(aux-128) + 128
+    aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
+
+    img = aux.astype('uint8')
+
+    return img
+
+def saturationF(img, f, force=[0.8,1.1]) :
+    f=f*(force[1]-force[0])+force[0]
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
     img[:,:,1] = img[:,:,1]*f
     img = cv2.cvtColor(img,cv2.COLOR_HSV2BGR)
