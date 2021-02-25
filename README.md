@@ -4,6 +4,6 @@
 
 1. Clone the repository to [YourFolder]
 2. Add [YourFolder]\ViFiDA\src to the PYTHONPATH environment variable
-3. Execute [YourFolder]\ViFiDA\projectsExample\Draft\Draft.py as it is to check all is ok.
-4. Have fun.
+3. In order to check everything went fine, please execute [YourFolder]\ViFiDA\projectsExample\Draft\Draft.py as it is
+4. Have fun
 
