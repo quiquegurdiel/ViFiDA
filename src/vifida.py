@@ -8,7 +8,7 @@ import copy
 import matplotlib.pyplot as plt
 from skimage import filters, color, util
 
-#Audio related
+#--------------------Audio related----------------------------------
 def getMonoSignal(filepath, vervose=1):
     data, samplerate = sf.read(filepath)
     if vervose>1:
@@ -61,8 +61,27 @@ def normalizeClippedInterval(vector, interval='auto', k=2, thres=30) :
         interval = (m-k*s,m+k*s)
     vector = (np.clip(vector,interval[0],interval[1])-interval[0])/(interval[1]-interval[0])
     return vector
+#-------------------------------------------------------------------
 
-#filters F
+#--------------------F filters--------------------------------------
+#we are using a contrast transform that inputs from -128 to 128, being 0 the identity
+#negative numbers reduce thecontrast
+#positive value increase it
+def contrastF(img, f, amp=140, ori=-40) :
+    #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
+    value = f*amp+ori
+
+    #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
+    factor = (259*(value+255))/(255*(259-value))
+
+    aux = img.astype("double")
+    aux = factor*(aux-128) + 128
+    aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
+
+    img = aux.astype('uint8')
+
+    return img
+
 def contrastValueF(img, f, amp=100, ori=-50) :
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
 
@@ -81,22 +100,7 @@ def contrastValueF(img, f, amp=100, ori=-50) :
 
     return img
 
-def contrastF(img, f, amp=140, ori=-40) :
-    #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
-    value = f*amp+ori
-
-    #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
-    factor = (259*(value+255))/(255*(259-value))
-
-    aux = img.astype("double")
-    aux = factor*(aux-128) + 128
-    aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
-
-    img = aux.astype('uint8')
-
-    return img
-
-def saturationF(img, f, force=[0.8,1.1]) :
+def saturationF(img, f, force=[0.7,1]) :
     f=f*(force[1]-force[0])+force[0]
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
     img[:,:,1] = img[:,:,1]*f
@@ -192,8 +196,13 @@ def posterizeF(img, f, top=30):
     palette = quantiz[levels]
     img = palette[img]
     return img
+#-------------------------------------------------------------------
 
-#Video related
+#--------------------Video related----------------------------------
+#isMasked is derived from the lenght of each particular driveFilter: isMasked = len(driveFilters[j])>2
+#
+#   TBD: instead, it would be better to use some sort of named list, so other optional properties can
+#   be included in the same fashion without depending strictly on a predefined order
 def writeFVideoFromImage(videofilepath, imagefilepath, duration, framerate, *driveFilters):
     I = cv2.imread(imagefilepath)
     height, width = I.shape[0:2]
@@ -211,7 +220,43 @@ def writeFVideoFromImage(videofilepath, imagefilepath, duration, framerate, *dri
             thisI = thatFilter(thisI,thatF)
             if isMasked:
                 thatMask = driveFilters[j][2]
+                #next line means-> output = (processed & mask) + (original & !mask)
                 thisI = cv2.bitwise_and(thisI,thatMask) + cv2.bitwise_and(thisOldI,cv2.bitwise_not(thatMask)) 
+        video.write(thisI)
+    video.release()
+    return 0
+
+#modulation introduces another vector which regulates the intensity of the effect applied
+#   -makes sense for effects driven by acoustical dimensions with no sense of intensity (as the pitch)
+#   -the straightforward use is a function of the loudness as modulation
+#
+#   WARNING: currently only works globaly, so it would make sense only with one effect at a time
+#   
+#   TBD: introduce it in the same workflow, as another property of the dirive, something similar to
+#   what is done with the mask (so both functions can be unified)
+def writeModulatedFVideoFromImage(modulation, videofilepath, imagefilepath, duration, framerate, *driveFilters):
+    I = cv2.imread(imagefilepath)
+    height, width = I.shape[0:2]
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(videofilepath,cvcodec,framerate,(width,height))
+    for i in range(framecount):
+        thisI = I
+        for j in range(len(driveFilters)):
+            thisOldI = thisI
+            thatDrive = driveFilters[j][0]
+            thatFilter = driveFilters[j][1]
+            isMasked = len(driveFilters[j])>2
+            thatF = thatDrive[i]
+            thisI = thatFilter(thisI,thatF)
+            if isMasked:
+                thatMask = driveFilters[j][2]
+                #fuzzy-logic: next line means -> masked = (processed & mask) + (original & !mask)
+                #being mask a 2D array, an image of values between 0 and 1
+                thisI = cv2.bitwise_and(thisI,thatMask) + cv2.bitwise_and(thisOldI,cv2.bitwise_not(thatMask)) 
+        #fuzzy-logic: next line means -> modulated = (processed & modulation) + (original & !modulation)
+        #being modulation a 1D array, a "drive", a vector of values between 0 and 1
+        thisI = cv2.addWeighted(thisI,modulation[i],thisOldI,1-modulation[i],0)
         video.write(thisI)
     video.release()
     return 0
@@ -221,8 +266,9 @@ def writeOutputFile(outfilepath,videofilepath,trackfilepath,codec='libx264'):
     video.write_videofile(outfilepath, codec=codec, audio=trackfilepath)
     os.remove(videofilepath)
     return 0
+#-------------------------------------------------------------------
 
-#Maths
+#--------------------Maths------------------------------------------
 def movingAverage(vector, n) :
     out = np.cumsum(vector, dtype=float)
     out[n:] = out[n:] - out[:-n]
@@ -235,8 +281,9 @@ def amplitudeToDecibels(amplitude, ref):
 def powerCorrection(drive, pow):
     drive = drive**pow
     return drive
+#-------------------------------------------------------------------
 
-#Graphs
+#--------------------Graphs-----------------------------------------
 def autoAnalysis(drive, k=2, thres=30):
     m = np.mean(drive[drive>thres])
     std = np.std(drive[drive>thres])
@@ -255,8 +302,9 @@ def getPltColormap(name,n=256):
     sm = plt.cm.ScalarMappable(cmap=cmap)
     colormap = sm.to_rgba(np.linspace(0, 1, n))
     return colormap
+#-------------------------------------------------------------------
 
-#Shorcuts
+#--------------------Shortcuts--------------------------------------
 def getMediaPath(filename=''):
     out = os.getcwd()
     out = os.path.join(out,'media',filename)
@@ -278,3 +326,4 @@ def imshowQuick(img,name='1'):
     cv2.imshow(name,img)
     cv2.waitKey(0)
     return 0
+#-------------------------------------------------------------------
