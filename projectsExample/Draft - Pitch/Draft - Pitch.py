@@ -25,13 +25,12 @@ plt.ylabel("Loudness")
 plt.legend()
 plt.show() """
 
-odrive = getDriveFromSignal(signal,duration,samplerate,framerate, timewindow = timewindow)
+drive = getDriveFromSignal(signal,duration,samplerate,framerate, timewindow = timewindow)
 """ autoAnalysis(drive) """
-drive = normalizeClippedInterval(odrive,thres=70)
+driveF = normalizeClippedInterval(drive,thres=70)
 
 #Define aubio parameters
-hop_s = math.ceil(len(signal)/len(drive))
-#hop_s = 1
+hop_s = math.ceil(len(signal)/len(driveF))
 win_s = 4096
 
 #Testing with aubio
@@ -88,13 +87,20 @@ plt.plot(combo3,color='blue',label='pitch*pitch*drive')
 plt.legend()
 plt.show() """
 
-#Video processing
+#in/out paths
 videofilepath = getOutputPath("temp.mp4")
 imagefilepath = getMediaPath("moto.jpg")
-pianoF = [pitch,equalizationF]
-writeModulatedFVideoFromImage(drive,videofilepath,imagefilepath,duration,framerate,pianoF)
 
-#Output rendering (video+audio)
-outfilepath=getOutputPath("moto.mp4")
+#Main process with only pitch
+pianoO = order(pitch, equalizationF)
+writeFVideoFromImage_beta(videofilepath,imagefilepath,duration,framerate,pianoO)
+outfilepath=getOutputPath("moto_pitchonly.mp4")
+trackfilepath=getMediaPath("do_major.mp3")
+writeOutputFile(outfilepath,videofilepath,trackfilepath)
+
+#Main process with pitch modulated by loudness
+pianoO = order(pitch, equalizationF, modulator=driveF)
+writeFVideoFromImage_beta(videofilepath,imagefilepath,duration,framerate,pianoO)
+outfilepath=getOutputPath("moto_pitchmodulated.mp4")
 trackfilepath=getMediaPath("do_major.mp3")
 writeOutputFile(outfilepath,videofilepath,trackfilepath)

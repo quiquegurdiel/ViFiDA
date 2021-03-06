@@ -7,6 +7,7 @@ import os
 import copy
 import matplotlib.pyplot as plt
 from skimage import filters, color, util
+from collections import namedtuple
 
 #--------------------Audio related----------------------------------
 def getMonoSignal(filepath, vervose=1):
@@ -63,7 +64,7 @@ def normalizeClippedInterval(vector, interval='auto', k=2, thres=30) :
     return vector
 #-------------------------------------------------------------------
 
-#--------------------F filters--------------------------------------
+#--------------------Fuzzy filters----------------------------------
 #we are using a contrast transform that inputs from -128 to 128, being 0 the identity
 #negative numbers reduce thecontrast
 #positive value increase it
@@ -82,6 +83,7 @@ def contrastF(img, f, amp=140, ori=-40) :
 
     return img
 
+#same as contrastF acting only on the value channel
 def contrastValueF(img, f, amp=100, ori=-50) :
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
 
@@ -261,11 +263,47 @@ def writeModulatedFVideoFromImage(modulation, videofilepath, imagefilepath, dura
     video.release()
     return 0
 
+#   testing a global approach
+def writeFVideoFromImage_beta(videofilepath, imagefilepath, duration, framerate, *orders):
+    img = cv2.imread(imagefilepath)
+    height, width = img.shape[0:2]
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(videofilepath,cvcodec,framerate,(width,height))    
+    for i in range(framecount):         #i iterates over frames
+        originalFrame = img.copy()
+        filteredFrame = originalFrame.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatDriver = getattr(orders[j], 'driver')
+            thatFilter = getattr(orders[j], 'filter')
+            isMasked = not (getattr(orders[j], 'mask') is None)
+            isModulated = not (getattr(orders[j], 'modulator') is None)
+            f = thatDriver[i]
+            filteredFrame = thatFilter(filteredFrame,f)
+            if isMasked & isModulated:
+                thatMask = orders[j][2]
+                norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
+                filteredFrame = cv2.bitwise_and(filteredFrame,thatMask*thatModulator[i]/norm) + cv2.bitwise_and(originalFrame,cv2.bitwise_not(thatMask)*(1-thatModulator[i])/norm)
+            elif isMasked:
+                filteredFrame = cv2.bitwise_and(filteredFrame,thatMask) + cv2.bitwise_and(originalFrame,cv2.bitwise_not(thatMask))
+            elif isModulated:
+                thatModulator = getattr(orders[j], 'modulator')
+                filteredFrame = cv2.addWeighted(filteredFrame,thatModulator[i],originalFrame,1-thatModulator[i],0)
+            originalFrame = filteredFrame.copy()    #next filter acts over the filtered image
+        video.write(filteredFrame)
+    video.release()
+    return 0
+
 def writeOutputFile(outfilepath,videofilepath,trackfilepath,codec='libx264'):
     video = mp.VideoFileClip(videofilepath)
     video.write_videofile(outfilepath, codec=codec, audio=trackfilepath)
     os.remove(videofilepath)
     return 0
+#-------------------------------------------------------------------
+
+#--------------------Orders-----------------------------------------
+order = namedtuple('order', ['driver', 'filter', 'mask', 'modulator'])
+order.__new__.__defaults__=(None,None)
 #-------------------------------------------------------------------
 
 #--------------------Maths------------------------------------------
