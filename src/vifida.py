@@ -201,6 +201,19 @@ def posterizeF(img, f, top=30):
 #-------------------------------------------------------------------
 
 #--------------------Video related----------------------------------
+def createStereoMask(infilepath):
+    I = cv2.imread(infilepath)
+    height, width = I.shape[0:2]
+    aux = np.linspace(0, 1, width)
+    maskR = np.array([aux,]*height)
+    maskL = 1-maskR
+    return [maskL,maskR]
+
+def combineMasks(mask1,mask2):
+    norm = 2*mask1*mask2+1-mask1-mask2
+    norm[norm==0] = 1 #avoid 0 division
+    return mask1*mask2/norm
+
 #isMasked is derived from the lenght of each particular driveFilter: isMasked = len(driveFilters[j])>2
 #
 #   TBD: instead, it would be better to use some sort of named list, so other optional properties can
@@ -264,46 +277,56 @@ def writeModulatedFVideoFromImage(modulation, videofilepath, imagefilepath, dura
     return 0
 
 #   testing a global approach
-def writeFVideoFromImage_beta(videofilepath, imagefilepath, duration, framerate, *orders):
-    img = cv2.imread(imagefilepath)
+def writeFVideoFromImage_beta(tempfilepath, infilepath, duration, framerate, *orders):
+    img = cv2.imread(infilepath)
     height, width = img.shape[0:2]
     framecount = math.ceil(duration*framerate)
     cvcodec = cv2.VideoWriter_fourcc(*'avc1')
-    video = cv2.VideoWriter(videofilepath,cvcodec,framerate,(width,height))    
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
     for i in range(framecount):         #i iterates over frames
-        originalFrame = img.copy()
-        filteredFrame = originalFrame.copy()
+        thisOriginal = img.copy()
+        thisFiltered = thisOriginal.copy()
         for j in range(len(orders)):    #j iterates over orders
-            thatDriver = getattr(orders[j], 'driver')
-            thatFilter = getattr(orders[j], 'filter')
-            isMasked = not (getattr(orders[j], 'mask') is None)
-            isModulated = not (getattr(orders[j], 'modulator') is None)
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
             f = thatDriver[i]
-            filteredFrame = thatFilter(filteredFrame,f)
+            thisFiltered = thatFilter(thisFiltered,f)
             if isMasked & isModulated:
-                thatMask = orders[j][2]
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
                 norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
-                filteredFrame = cv2.bitwise_and(filteredFrame,thatMask*thatModulator[i]/norm) + cv2.bitwise_and(originalFrame,cv2.bitwise_not(thatMask)*(1-thatModulator[i])/norm)
+                norm[norm==0] = 1 #avoid 0 division
+                aux1 = np.transpose(np.array([ thatMask*thatModulator[i]/norm ,]*3),(1,2,0))
+                aux2 = np.transpose(np.array([ (1-thatMask)*(1-thatModulator[i])/norm ,]*3),(1,2,0))
+                #move back and forth from uint to double types takes time!_______________
+                thisFiltered = thisFiltered*aux1 + thisOriginal*aux2
+                thisFiltered = thisFiltered.astype('uint8')     #returnt to uint precision
+                #_________________________________________________________________________
             elif isMasked:
-                filteredFrame = cv2.bitwise_and(filteredFrame,thatMask) + cv2.bitwise_and(originalFrame,cv2.bitwise_not(thatMask))
+                thatMask = getattr(thatOrder, 'mask')
+                thisFiltered = cv2.bitwise_and(thisFiltered,thatMask) + cv2.bitwise_and(thisOriginal,cv2.bitwise_not(thatMask))
             elif isModulated:
-                thatModulator = getattr(orders[j], 'modulator')
-                filteredFrame = cv2.addWeighted(filteredFrame,thatModulator[i],originalFrame,1-thatModulator[i],0)
-            originalFrame = filteredFrame.copy()    #next filter acts over the filtered image
-        video.write(filteredFrame)
+                thatModulator = getattr(thatOrder, 'modulator')
+                thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write(thisFiltered)
     video.release()
     return 0
 
-def writeOutputFile(outfilepath,videofilepath,trackfilepath,codec='libx264'):
-    video = mp.VideoFileClip(videofilepath)
-    video.write_videofile(outfilepath, codec=codec, audio=trackfilepath)
-    os.remove(videofilepath)
+def writeOutputFile(outfilepath,tempfilepath,audiofilepath,codec='libx264'):
+    video = mp.VideoFileClip(tempfilepath)
+    video.write_videofile(outfilepath, codec=codec, audio=audiofilepath)
+    os.remove(tempfilepath)
     return 0
 #-------------------------------------------------------------------
 
 #--------------------Orders-----------------------------------------
 order = namedtuple('order', ['driver', 'filter', 'mask', 'modulator'])
-order.__new__.__defaults__=(None,None)
+#next define defaults only for mask and modulator, driver and filter are mandatory
+order.__new__.__defaults__=(None,None)      #it starts asigning from latest variable
 #-------------------------------------------------------------------
 
 #--------------------Maths------------------------------------------
