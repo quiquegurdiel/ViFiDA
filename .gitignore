@@ -2,3 +2,5 @@ projects/
 projects/**/*.*
 src/__pycache__/
 *.mp4
+.vscode/
+.vscode/**/*.*
