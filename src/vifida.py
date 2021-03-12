@@ -3,65 +3,255 @@ import soundfile as sf
 import moviepy.editor as mp
 from cv2 import cv2
 import math
+import sys
 import os
-import copy
 import matplotlib.pyplot as plt
 from skimage import filters, color, util
 from collections import namedtuple
+import aubio as au
 
 #--------------------Audio related----------------------------------
-def getMonoSignal(filepath, vervose=1):
+def getSignal(filepath, forceMono=False, vervose=1):
     data, samplerate = sf.read(filepath)
     if vervose>1:
-        print("----------Audio loaded-------------------")
-        print("File path: "+filepath)
-        print("Sample rate: "+str(samplerate)+" Hz")
+        print('----------Audio loaded-------------------')
+        print('File path: '+filepath)
+        print('Sample rate: '+str(samplerate)+' Hz')
 
-    if len(data.shape) == 2:
+    if forceMono & (len(data.shape) == 2):
         signal = (data[:,0]+data[:,1])/2
         signal = signal[:,]
         if vervose>1:
-            print("Channel mode: Stereo")
+            print('Channel mode: Forced Mono')
     else:
         signal=data
         if vervose>1:
-            print("Channel mode: Mono")
+            if len(data.shape) == 2:
+                print('Channel mode: Stereo')
+            else:
+                print('Channel mode: Mono')
 
     duration=len(signal)/samplerate
     if vervose>1:
-        print("Duration: "+str(round(duration,2))+" s")
-        print("-----------------------------------------")
+        print('Duration: '+str(round(duration,2))+' s')
+        print('-----------------------------------------')
 
     signal = abs(signal)
     return signal, samplerate, duration
 
-def signalToSensed(signal, timewindow, samplerate, ref):
+def signalToLoudness(signal, samplerate, timewindow=0.3, ref=10**(-5)):
+    loudness = np.zeros_like(signal)
+    channels = len(signal.shape)    #1(mono) or 2(stereo)
     samplewindow = math.ceil(timewindow*samplerate)
-    signal = np.concatenate([np.zeros(samplewindow-1),signal])
-    sensed = movingAverage(signal,samplewindow)
-    sensed = amplitudeToDecibels(sensed, ref)
-    return sensed
+    if channels==1:
+        signal = np.concatenate([np.zeros(samplewindow-1),signal])
+        loudness = movingAverage(signal,samplewindow)
+    else:   #iterate channels when stereo
+        signal = np.concatenate([np.zeros((samplewindow-1,channels)),signal])
+        for i in range(len(signal.shape)):
+            thisLoud = np.transpose(signal)[i]
+            thisLoud = movingAverage(thisLoud,samplewindow)
+            loudness[:,i] = thisLoud
+    loudness = amplitudeToDecibels(loudness, ref)
+    return loudness
+
+def wavToPitch(wavfilepath, signal, samplerate, duration, framerate, win_s=4096, tolerance=0.8, pitchMethod='mcomb'):
+    framecount = math.ceil(duration*framerate)
+    hop_s = math.ceil(len(signal)/framecount) #aubio parameter, number of audio samples to skip
+    s = au.source(wavfilepath, samplerate, hop_s)
+    #Supported methods: `yinfft`, `yin`, `yinfast`, `fcomb`, `mcomb`,
+    #`schmitt`, `specacf`, `default` (`yinfft`)
+    pitch_o = au.pitch(pitchMethod, win_s, hop_s, samplerate)
+    pitch_o.set_unit('midi')
+    pitch_o.set_tolerance(tolerance)
+    pitches = []
+    total_frames = 0    #total number of frames read
+    while True:
+        samples, read = s()
+        pitch = pitch_o(samples)[0]
+        #pitch = int(round(pitch))
+        #if confidence < 0.8: pitch = 0.
+        #print("%f %f %f" % (total_frames / float(samplerate), pitch, confidence))
+        pitches += [pitch]
+        total_frames += read
+        if read < hop_s: break
+    return np.asarray(pitches)
+
+def wavToSensed(wavfilepath, framerate, mode='loudness', forceMono=False, vervose=1):
+    signal, samplerate, duration = getSignal(wavfilepath,forceMono=forceMono, vervose=vervose)
+    if mode=='loudness':
+        sensed = signalToLoudness(signal,samplerate)
+        sensed = quantizeToFrames(sensed,duration,samplerate,framerate)
+    elif mode=='pitch':
+        sensed = wavToPitch(wavfilepath,signal,samplerate,duration,framerate)
+    else:
+        sys.exit('unknown mode argument, only "loudness" (default) and "pitch" supported')
+    return sensed, samplerate, duration
 
 def quantizeToFrames(sensed, duration, samplerate, framerate):
     framecount = math.ceil(duration*framerate)
     last = math.floor((framecount-1)*samplerate/framerate)
     ind = np.linspace(0,last,framecount)
     ind = ind.astype(int)
-    drive = sensed[ind]
+    drive = sensed[ind]     #works in stereo too!
     return drive
 
-def getDriveFromSignal(signal, duration, samplerate, framerate, timewindow = 0.3, ref=10**(-5)):
-    sensed = signalToSensed(signal,timewindow,samplerate,ref)
-    drive = quantizeToFrames(sensed,duration, samplerate, framerate)
-    return drive
-
-def normalizeClippedInterval(vector, interval='auto', k=2, thres=30) :
+def sensedToFuzzy(sensed, interval='auto', k=2, thres=30) :
     if interval=='auto':
-        m = np.mean(vector[vector>thres])
-        s = np.std(vector[vector>thres])
+        m = np.mean(sensed[sensed>thres])
+        s = np.std(sensed[sensed>thres])
         interval = (m-k*s,m+k*s)
-    vector = (np.clip(vector,interval[0],interval[1])-interval[0])/(interval[1]-interval[0])
-    return vector
+    fuzzy = (np.clip(sensed,interval[0],interval[1])-interval[0])/(interval[1]-interval[0])
+    return fuzzy
+#-------------------------------------------------------------------
+
+#--------------------Video related----------------------------------
+def getStereoMask(height, width):
+    aux = np.linspace(0, 1, width)
+    maskR = monocromeToColor(np.array([aux,]*height))
+    maskL = 1-maskR
+    return [maskL,maskR]
+
+def combineMasks(mask1,mask2):
+    norm = 2*mask1*mask2+1-mask1-mask2
+    norm[norm==0] = 1 #avoid 0 division
+    return mask1*mask2/norm
+
+def writeFVideoFromImage(tempfilepath, infilepath, duration, framerate, *orders):
+    isAnyStereo = False
+    for i in range(len(orders)):
+        isAnyStereo = ( isAnyStereo or isStereoOrder(orders[i]) )
+    if isAnyStereo:
+        stereoOrders=list()
+        for i in range(len(orders)):
+            stereoOrders.append(forceStereoOrder(orders[i]))
+        writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, stereoOrders)
+    else:
+        writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orders)
+    return 0
+
+def writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orders):
+    img = cv2.imread(infilepath)
+    height, width = img.shape[0:2]
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
+    for i in range(framecount):         #i iterates over frames
+        thisOriginal = img.copy()
+        thisFiltered = thisOriginal.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
+            f = thatDriver[i]
+            thisFiltered = thatFilter(thisFiltered,f)
+            if isMasked & isModulated:
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
+                norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
+                norm[norm==0] = 1 #avoid 0 division
+                aux = thatMask*thatModulator[i]/norm
+                thisFiltered = cv2.multiply(thisFiltered,aux,dtype=8)
+                thisFiltered = cv2.add(thisFiltered, cv2.multiply(thisOriginal,(1-aux),dtype=8) )
+            elif isMasked:
+                thatMask = getattr(thatOrder, 'mask')
+                thisFiltered = cv2.multiply(thisFiltered,thatMask,dtype=8)
+                thisFiltered = cv2.add(thisFiltered, cv2.multiply(thisOriginal,(1-thatMask),dtype=8) )
+            elif isModulated:
+                thatModulator = getattr(thatOrder, 'modulator')
+                thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write(thisFiltered)
+    video.release()
+    return 0
+
+def writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, orders):
+    img = cv2.imread(infilepath)
+    height, width = img.shape[0:2]
+    stereoMask = getStereoMask(height,width)    #create the stereo mask
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
+    for i in range(framecount):         #i iterates over frames
+        thisOriginal = [img.copy(), img.copy()]     #work out each channel sepparately
+        thisFiltered = thisOriginal.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
+            f = thatDriver[i]
+            thisFiltered = [thatFilter(thisFiltered[0],f[0]),thatFilter(thisFiltered[1],f[1])]
+            if isMasked & isModulated:
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
+                for k in range(len(thisFiltered)):      #k iterates over channels
+                    norm = 2*thatMask*thatModulator[i][k]+1-thatMask-thatModulator[i][k]
+                    norm[norm==0] = 1 #avoid 0 division
+                    aux = thatMask*thatModulator[i][k]/norm
+                    thisFiltered[k] = cv2.multiply(thisFiltered[k],aux,dtype=8)
+                    thisFiltered[k] = cv2.add(thisFiltered[k], cv2.multiply(thisOriginal[k],(1-aux),dtype=8) )
+            elif isMasked:
+                thatMask = getattr(thatOrder, 'mask')
+                for k in range(len(thisFiltered)):      #k iterates channels
+                    thisFiltered[k] = cv2.multiply(thisFiltered[k],thatMask,dtype=8)
+                    thisFiltered[k] = cv2.add(thisFiltered[k], cv2.multiply(thisOriginal[k],(1-thatMask),dtype=8) )
+            elif isModulated:
+                thatModulator = getattr(thatOrder, 'modulator')
+                for k in range(len(thisFiltered)):      #k iterates channels
+                    thisFiltered[k] = cv2.addWeighted(thisFiltered[k],thatModulator[i][k],thisOriginal[k],1-thatModulator[k][0],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write(combineStereo(thisFiltered,stereoMask))
+    video.release()
+    return 0
+
+def isStereoOrder(subject):
+    driver = getattr(subject, 'driver' )
+    isStereoDriver = len(driver.shape)==2
+    if isStereoDriver:
+        return True
+    else:
+        modulator = getattr(subject, 'modulator' )
+        isModulated = not (modulator is None)
+        if isModulated:
+            isStereoModulator = len(modulator.shape)==2
+            return isStereoModulator
+        else:
+            return False
+
+def forceStereoOrder(old):
+    driver = getattr(old, 'driver' )
+    isMonoDriver = len(driver.shape)==1
+    if isMonoDriver:
+        driver = np.transpose([driver,driver])
+    fFilter = getattr(old, 'filter' )
+    mask = getattr(old, 'mask' )
+    modulator = getattr(old, 'modulator' )
+    isModulated = not (modulator is None)
+    if isModulated:
+        isMonoModulated = len(modulator.shape)==1
+        if isMonoModulated:
+            modulator= np.transpose([modulator,modulator])
+    new = order(driver,fFilter,mask,modulator)
+    return new
+
+def monocromeToColor(img):
+    img = np.transpose(np.array([img,]*3),(1,2,0))
+    return img
+
+def combineStereo(filtered,mask):
+    combined = cv2.multiply(filtered[0],mask[0],dtype=8)
+    combined = cv2.add(combined, cv2.multiply(filtered[1],mask[1],dtype=8) )
+    return combined
+
+def writeOutputFile(outfilepath,tempfilepath,audiofilepath,codec='libx264'):
+    video = mp.VideoFileClip(tempfilepath)
+    video.write_videofile(outfilepath, codec=codec, audio=audiofilepath)
+    os.remove(tempfilepath)
+    return 0
 #-------------------------------------------------------------------
 
 #--------------------Fuzzy filters----------------------------------
@@ -75,7 +265,7 @@ def contrastF(img, f, amp=140, ori=-40) :
     #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
     factor = (259*(value+255))/(255*(259-value))
 
-    aux = img.astype("double")
+    aux = img.astype('double')
     aux = factor*(aux-128) + 128
     aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
 
@@ -93,7 +283,7 @@ def contrastValueF(img, f, amp=100, ori=-50) :
     #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
     factor = (259*(value+255))/(255*(259-value))
 
-    aux = img[:,:,2].astype("double")
+    aux = img[:,:,2].astype('double')
     aux = factor*(aux-128) + 128
     aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
     img[:,:,2] = aux.astype('uint8')
@@ -117,22 +307,22 @@ def getSizeMorfF(f, shape, center, sizemin, sizemax):
     size = f-center
     if size>0:
         size =  size/(1-center)
-        if shape in ("rect","circ"):
+        if shape in ('rect','circ'):
             size = powerCorrection(size,1/2)
         size = round(sizemax*size)
     elif size<0:
         size =  size/(-center)
-        if shape in ("rect","circ"):
+        if shape in ('rect','circ'):
             size = powerCorrection(size,1/2)
         size = round(sizemin*size)
     return int(size)
 
 def getKernelMorfF(shape,size):
-    if shape=="rect":
+    if shape=='rect':
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT,(size,size))
-    elif shape =="circ":
+    elif shape =='circ':
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE,(size,size))
-    elif shape=="cross":
+    elif shape=='cross':
         kernel = cv2.getStructuringElement(cv2.MORPH_CROSS,(size,size))
     return kernel
 
@@ -143,7 +333,7 @@ def applyMorfF(img,f,kernel,center,invert):
         img = cv2.erode(img,kernel)
     return img
 
-def HSVmorfF(img, f, shape="rect", center=0.5, sizemin=50, sizemax=50, invert=0) :
+def HSVmorfF(img, f, shape='rect', center=0.5, sizemin=50, sizemax=50, invert=0) :
     size = getSizeMorfF(f, shape, center, sizemin, sizemax)
     if size!=0:
         img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
@@ -152,25 +342,16 @@ def HSVmorfF(img, f, shape="rect", center=0.5, sizemin=50, sizemax=50, invert=0)
         img = cv2.cvtColor(img,cv2.COLOR_HSV2BGR)
     return img
 
-def RGBmorfF(img, f, shape="rect", center=0.5, sizemin=50, sizemax=50, invert=0) :
+def RGBmorfF(img, f, shape='rect', center=0.5, sizemin=50, sizemax=50, invert=0) :
     size = getSizeMorfF(f, shape, center, sizemin, sizemax)
     if size!=0:
         kernel = getKernelMorfF(shape,size)
         img = applyMorfF(img,f,kernel,center,invert)
     return img
 
-""" def noiseF(img, f, mode="gaussian", top=0.05, mean=0):
-    img = util.img_as_float(img)
-    if mode in ("gaussian", "speckle"):
-        img = util.random_noise(img,mode,var=f*top, mean=mean)
-    if mode in ("salt", "pepper", "s&p"):
-        img = util.random_noise(img,mode,amount=f*top)
-    img = util.img_as_ubyte(img)
-    return img """
-
 def noiseF(img, f, top=0.2, mean=0):
     height, width = img.shape[0:2]
-    out = np.zeros((height,width*3),dtype="uint8")
+    out = np.zeros((height,width*3),dtype='uint8')
     cv2.randn(out,0,top*255*f)
     out = np.resize(out,img.shape)
     out = out+img
@@ -181,7 +362,7 @@ def equalizationF(img, f, top=1, space='RGB', gamma=0):
     if space=='HSV':
         tran = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     else:
-        tran = copy.deepcopy(img)
+        tran = img.copy()
 
     for i in range(3):
         tran[:,:,i] = cv2.equalizeHist(tran[:,:,i])
@@ -198,129 +379,6 @@ def posterizeF(img, f, top=30):
     palette = quantiz[levels]
     img = palette[img]
     return img
-#-------------------------------------------------------------------
-
-#--------------------Video related----------------------------------
-def createStereoMask(infilepath):
-    I = cv2.imread(infilepath)
-    height, width = I.shape[0:2]
-    aux = np.linspace(0, 1, width)
-    maskR = np.array([aux,]*height)
-    maskL = 1-maskR
-    return [maskL,maskR]
-
-def combineMasks(mask1,mask2):
-    norm = 2*mask1*mask2+1-mask1-mask2
-    norm[norm==0] = 1 #avoid 0 division
-    return mask1*mask2/norm
-
-#isMasked is derived from the lenght of each particular driveFilter: isMasked = len(driveFilters[j])>2
-#
-#   TBD: instead, it would be better to use some sort of named list, so other optional properties can
-#   be included in the same fashion without depending strictly on a predefined order
-def writeFVideoFromImage(videofilepath, imagefilepath, duration, framerate, *driveFilters):
-    I = cv2.imread(imagefilepath)
-    height, width = I.shape[0:2]
-    framecount = math.ceil(duration*framerate)
-    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
-    video = cv2.VideoWriter(videofilepath,cvcodec,framerate,(width,height))
-    for i in range(framecount):
-        thisI = I
-        for j in range(len(driveFilters)):
-            thisOldI = thisI
-            thatDrive = driveFilters[j][0]
-            thatFilter = driveFilters[j][1]
-            isMasked = len(driveFilters[j])>2
-            thatF = thatDrive[i]
-            thisI = thatFilter(thisI,thatF)
-            if isMasked:
-                thatMask = driveFilters[j][2]
-                #next line means-> output = (processed & mask) + (original & !mask)
-                thisI = cv2.bitwise_and(thisI,thatMask) + cv2.bitwise_and(thisOldI,cv2.bitwise_not(thatMask)) 
-        video.write(thisI)
-    video.release()
-    return 0
-
-#modulation introduces another vector which regulates the intensity of the effect applied
-#   -makes sense for effects driven by acoustical dimensions with no sense of intensity (as the pitch)
-#   -the straightforward use is a function of the loudness as modulation
-#
-#   WARNING: currently only works globaly, so it would make sense only with one effect at a time
-#   
-#   TBD: introduce it in the same workflow, as another property of the dirive, something similar to
-#   what is done with the mask (so both functions can be unified)
-def writeModulatedFVideoFromImage(modulation, videofilepath, imagefilepath, duration, framerate, *driveFilters):
-    I = cv2.imread(imagefilepath)
-    height, width = I.shape[0:2]
-    framecount = math.ceil(duration*framerate)
-    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
-    video = cv2.VideoWriter(videofilepath,cvcodec,framerate,(width,height))
-    for i in range(framecount):
-        thisI = I
-        for j in range(len(driveFilters)):
-            thisOldI = thisI
-            thatDrive = driveFilters[j][0]
-            thatFilter = driveFilters[j][1]
-            isMasked = len(driveFilters[j])>2
-            thatF = thatDrive[i]
-            thisI = thatFilter(thisI,thatF)
-            if isMasked:
-                thatMask = driveFilters[j][2]
-                #fuzzy-logic: next line means -> masked = (processed & mask) + (original & !mask)
-                #being mask a 2D array, an image of values between 0 and 1
-                thisI = cv2.bitwise_and(thisI,thatMask) + cv2.bitwise_and(thisOldI,cv2.bitwise_not(thatMask)) 
-        #fuzzy-logic: next line means -> modulated = (processed & modulation) + (original & !modulation)
-        #being modulation a 1D array, a "drive", a vector of values between 0 and 1
-        thisI = cv2.addWeighted(thisI,modulation[i],thisOldI,1-modulation[i],0)
-        video.write(thisI)
-    video.release()
-    return 0
-
-#   testing a global approach
-def writeFVideoFromImage_beta(tempfilepath, infilepath, duration, framerate, *orders):
-    img = cv2.imread(infilepath)
-    height, width = img.shape[0:2]
-    framecount = math.ceil(duration*framerate)
-    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
-    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
-    for i in range(framecount):         #i iterates over frames
-        thisOriginal = img.copy()
-        thisFiltered = thisOriginal.copy()
-        for j in range(len(orders)):    #j iterates over orders
-            thatOrder = orders[j]
-            thatDriver = getattr(thatOrder, 'driver' )
-            thatFilter = getattr(thatOrder, 'filter' )
-            isMasked = not (getattr(thatOrder, 'mask' ) is None)
-            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
-            f = thatDriver[i]
-            thisFiltered = thatFilter(thisFiltered,f)
-            if isMasked & isModulated:
-                thatMask = getattr(thatOrder, 'mask' )
-                thatModulator = getattr(thatOrder, 'modulator' )
-                norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
-                norm[norm==0] = 1 #avoid 0 division
-                aux1 = np.transpose(np.array([ thatMask*thatModulator[i]/norm ,]*3),(1,2,0))
-                aux2 = np.transpose(np.array([ (1-thatMask)*(1-thatModulator[i])/norm ,]*3),(1,2,0))
-                #move back and forth from uint to double types takes time!_______________
-                thisFiltered = thisFiltered*aux1 + thisOriginal*aux2
-                thisFiltered = thisFiltered.astype('uint8')     #returnt to uint precision
-                #_________________________________________________________________________
-            elif isMasked:
-                thatMask = getattr(thatOrder, 'mask')
-                thisFiltered = cv2.bitwise_and(thisFiltered,thatMask) + cv2.bitwise_and(thisOriginal,cv2.bitwise_not(thatMask))
-            elif isModulated:
-                thatModulator = getattr(thatOrder, 'modulator')
-                thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
-            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
-        video.write(thisFiltered)
-    video.release()
-    return 0
-
-def writeOutputFile(outfilepath,tempfilepath,audiofilepath,codec='libx264'):
-    video = mp.VideoFileClip(tempfilepath)
-    video.write_videofile(outfilepath, codec=codec, audio=audiofilepath)
-    os.remove(tempfilepath)
-    return 0
 #-------------------------------------------------------------------
 
 #--------------------Orders-----------------------------------------
@@ -349,11 +407,11 @@ def autoAnalysis(drive, k=2, thres=30):
     m = np.mean(drive[drive>thres])
     std = np.std(drive[drive>thres])
     plt.figure(1)
-    plt.title("Auto mode")
+    plt.title('Auto mode')
     plt.plot(drive,color='blue',label='drive')
     plt.axhline (m+k*std,color='black', linestyle='dashed')
     plt.axhline (m-k*std,color='black', linestyle='dashed')
-    plt.ylabel("Amplitude / Db")
+    plt.ylabel('Amplitude / Db')
     plt.ylim(0,100)
     plt.legend()
     plt.show()
@@ -369,6 +427,14 @@ def getPltColormap(name,n=256):
 def getMediaPath(filename=''):
     out = os.getcwd()
     out = os.path.join(out,'media',filename)
+    return out
+
+def getWavPath(filename):
+    out = getMediaPath(filename+'.wav')
+    return out
+
+def getMp3Path(filename):
+    out = getMediaPath(filename+'.mp3')
     return out
 
 def getOutputPath(filename=''):

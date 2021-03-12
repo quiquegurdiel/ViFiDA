@@ -1,9 +1,6 @@
 #--------------------ViFiDA-----------------------------------------
 from vifida import *
-import os
-
-#Set current folder to project
-os.chdir(os.path.dirname(os.path.realpath(__file__)))
+os.chdir(os.path.dirname(os.path.realpath(__file__)))   #current folder to this file location
 #--------------------------------------------------------------------
 
 """ load an image just to get its size """
@@ -13,7 +10,7 @@ height, width = I.shape[0:2]
 
 #1 - create an horizontal mask linearly increasing from 0 to 1
 aux = np.linspace(0, 1, width)
-maskX = np.array([aux,]*height) #this is the way is done in createStereoMask() by default
+maskX = np.array([aux,]*height) #this is the way is done in getStereoMask() by default
 imshowQuick(maskX,'1 - horizontal mask')
 
 #2 - create a vertical mask linearly increasing from 0 to 1
@@ -61,7 +58,7 @@ for i in range(N):
 lame = np.transpose(np.array([lameR,lameG,lameB]),(1,2,0))
 imshowQuick(lame,'5 - unnormalized')
 
-""" that is the main point, you can uncomment below to go trough some divagations """
+""" that is the main point, but you can uncomment below to go trough some divagations """
 
 """ #6 - what if we combine a mask with its negation? (not really sure why would you want to)
 test = combineMasks(maskX,1-maskX)
@@ -74,7 +71,10 @@ imshowQuick(test,'6 - combine with negative')
 #7 - if we don't normalize we get instead
 testLame = maskX * (1-maskX)
 imshowQuick(testLame,'7 - unnormalized with negative')
-#if we consider the width as 1, we are just intensity-ploting x*(x-1) in all rows
+#if we consider the width as 1, we are just intensity-ploting x*(x-1) in every row
 #that is a parabola with 0 in both sides and a maximum value of 0.25 in the middle
 
-#so?... nothing really, at least by now, but is quite cool to know it """
+#so?... nothing really, at least by now, but is quite cool to know it
+
+#p.s.(two days later): if you are ever playing arround and see an unexpected black
+#region in the final result (using several masks or masks and modulators) remember this """
