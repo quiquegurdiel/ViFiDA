@@ -117,7 +117,11 @@ def combineMasks(mask1,mask2):
     norm[norm==0] = 1 #avoid 0 division
     return mask1*mask2/norm
 
-def writeFVideoFromImage(tempfilepath, infilepath, duration, framerate, *orders):
+def applyMask(filtered,original,mask):
+    return cv2.add( cv2.multiply(filtered,mask,dtype=8) , cv2.multiply(original,(1-mask),dtype=8) )
+
+def writeFVideoFromImage(tempfilepath, infilepath, duration, framerate, orders, globalMask=None):
+    isGloballyMasked = not globalMask is None
     isAnyStereo = False
     for i in range(len(orders)):
         isAnyStereo = ( isAnyStereo or isStereoOrder(orders[i]) )
@@ -125,9 +129,15 @@ def writeFVideoFromImage(tempfilepath, infilepath, duration, framerate, *orders)
         stereoOrders=list()
         for i in range(len(orders)):
             stereoOrders.append(forceStereoOrder(orders[i]))
-        writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, stereoOrders)
+        if isGloballyMasked:
+            writeFVideoFromImageStereoGlobal(tempfilepath, infilepath, duration, framerate, stereoOrders, globalMask)    
+        else:
+            writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, stereoOrders)
     else:
-        writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orders)
+        if isGloballyMasked:
+            writeFVideoFromImageMonoGlobal(tempfilepath, infilepath, duration, framerate, orders, globalMask)
+        else:
+            writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orders)
     return 0
 
 def writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orders):
@@ -138,7 +148,7 @@ def writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orde
     video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
     for i in range(framecount):         #i iterates over frames
         thisOriginal = img.copy()
-        thisFiltered = thisOriginal.copy()
+        thisFiltered = img.copy()
         for j in range(len(orders)):    #j iterates over orders
             thatOrder = orders[j]
             thatDriver = getattr(thatOrder, 'driver' )
@@ -153,17 +163,51 @@ def writeFVideoFromImageMono(tempfilepath, infilepath, duration, framerate, orde
                 norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
                 norm[norm==0] = 1 #avoid 0 division
                 aux = thatMask*thatModulator[i]/norm
-                thisFiltered = cv2.multiply(thisFiltered,aux,dtype=8)
-                thisFiltered = cv2.add(thisFiltered, cv2.multiply(thisOriginal,(1-aux),dtype=8) )
+                thisFiltered = applyMask(thisFiltered,thisOriginal,aux)
             elif isMasked:
                 thatMask = getattr(thatOrder, 'mask')
-                thisFiltered = cv2.multiply(thisFiltered,thatMask,dtype=8)
-                thisFiltered = cv2.add(thisFiltered, cv2.multiply(thisOriginal,(1-thatMask),dtype=8) )
+                thisFiltered = applyMask(thisFiltered,thisOriginal,thatMask)
             elif isModulated:
                 thatModulator = getattr(thatOrder, 'modulator')
                 thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
             thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
         video.write(thisFiltered)
+    video.release()
+    return 0
+
+def writeFVideoFromImageMonoGlobal(tempfilepath, infilepath, duration, framerate, orders, globalMask):
+    img = cv2.imread(infilepath)
+    height, width = img.shape[0:2]
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
+    for i in range(framecount):         #i iterates over frames
+        thisOriginal = img.copy()
+        thisFiltered = img.copy()
+        thisGlobal = img.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
+            f = thatDriver[i]
+            thisFiltered = thatFilter(thisFiltered,f)
+            if isMasked & isModulated:
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
+                norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
+                norm[norm==0] = 1 #avoid 0 division
+                aux = thatMask*thatModulator[i]/norm
+                thisFiltered = applyMask(thisFiltered,thisOriginal,aux)
+            elif isMasked:
+                thatMask = getattr(thatOrder, 'mask')
+                thisFiltered = applyMask(thisFiltered,thisOriginal,thatMask)
+            elif isModulated:
+                thatModulator = getattr(thatOrder, 'modulator')
+                thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write( applyMask(thisFiltered,thisGlobal,globalMask) )
     video.release()
     return 0
 
@@ -176,7 +220,7 @@ def writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, or
     video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
     for i in range(framecount):         #i iterates over frames
         thisOriginal = [img.copy(), img.copy()]     #work out each channel sepparately
-        thisFiltered = thisOriginal.copy()
+        thisFiltered = [img.copy(), img.copy()]
         for j in range(len(orders)):    #j iterates over orders
             thatOrder = orders[j]
             thatDriver = getattr(thatOrder, 'driver' )
@@ -192,19 +236,57 @@ def writeFVideoFromImageStereo(tempfilepath, infilepath, duration, framerate, or
                     norm = 2*thatMask*thatModulator[i][k]+1-thatMask-thatModulator[i][k]
                     norm[norm==0] = 1 #avoid 0 division
                     aux = thatMask*thatModulator[i][k]/norm
-                    thisFiltered[k] = cv2.multiply(thisFiltered[k],aux,dtype=8)
-                    thisFiltered[k] = cv2.add(thisFiltered[k], cv2.multiply(thisOriginal[k],(1-aux),dtype=8) )
+                    thisFiltered[k] = applyMask(thisFiltered[k],thisOriginal[k],aux)
             elif isMasked:
                 thatMask = getattr(thatOrder, 'mask')
                 for k in range(len(thisFiltered)):      #k iterates channels
-                    thisFiltered[k] = cv2.multiply(thisFiltered[k],thatMask,dtype=8)
-                    thisFiltered[k] = cv2.add(thisFiltered[k], cv2.multiply(thisOriginal[k],(1-thatMask),dtype=8) )
+                    thisFiltered[k] = applyMask(thisFiltered[k],thisOriginal[k],thatMask)
             elif isModulated:
                 thatModulator = getattr(thatOrder, 'modulator')
                 for k in range(len(thisFiltered)):      #k iterates channels
                     thisFiltered[k] = cv2.addWeighted(thisFiltered[k],thatModulator[i][k],thisOriginal[k],1-thatModulator[k][0],0)
             thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
         video.write(combineStereo(thisFiltered,stereoMask))
+    video.release()
+    return 0
+
+def writeFVideoFromImageStereoGlobal(tempfilepath, infilepath, duration, framerate, orders, globalMask):
+    img = cv2.imread(infilepath)
+    height, width = img.shape[0:2]
+    stereoMask = getStereoMask(height,width)    #create the stereo mask
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))    
+    for i in range(framecount):         #i iterates over frames
+        thisOriginal = [img.copy(), img.copy()]     #work out each channel sepparately
+        thisFiltered = [img.copy(), img.copy()]
+        thisGlobal = img.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
+            f = thatDriver[i]
+            thisFiltered = [thatFilter(thisFiltered[0],f[0]),thatFilter(thisFiltered[1],f[1])]
+            if isMasked & isModulated:
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
+                for k in range(len(thisFiltered)):      #k iterates over channels
+                    norm = 2*thatMask*thatModulator[i][k]+1-thatMask-thatModulator[i][k]
+                    norm[norm==0] = 1 #avoid 0 division
+                    aux = thatMask*thatModulator[i][k]/norm
+                    thisFiltered[k] = applyMask(thisFiltered[k],thisOriginal[k],aux)
+            elif isMasked:
+                thatMask = getattr(thatOrder, 'mask')
+                for k in range(len(thisFiltered)):      #k iterates channels
+                    thisFiltered[k] = applyMask(thisFiltered[k],thisOriginal[k],thatMask)
+            elif isModulated:
+                thatModulator = getattr(thatOrder, 'modulator')
+                for k in range(len(thisFiltered)):      #k iterates channels
+                    thisFiltered[k] = cv2.addWeighted(thisFiltered[k],thatModulator[i][k],thisOriginal[k],1-thatModulator[k][0],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write( applyMask( combineStereo(thisFiltered,stereoMask) ,thisGlobal,globalMask) )
     video.release()
     return 0
 
@@ -242,9 +324,9 @@ def monocromeToColor(img):
     img = np.transpose(np.array([img,]*3),(1,2,0))
     return img
 
-def combineStereo(filtered,mask):
-    combined = cv2.multiply(filtered[0],mask[0],dtype=8)
-    combined = cv2.add(combined, cv2.multiply(filtered[1],mask[1],dtype=8) )
+def combineStereo(stereoImage,stereoMask):
+    combined = cv2.multiply(stereoImage[0],stereoMask[0],dtype=8)
+    combined = cv2.add(combined, cv2.multiply(stereoImage[1],stereoMask[1],dtype=8) )
     return combined
 
 def writeOutputFile(outfilepath,tempfilepath,audiofilepath,codec='libx264'):
@@ -261,37 +343,30 @@ def writeOutputFile(outfilepath,tempfilepath,audiofilepath,codec='libx264'):
 def contrastF(img, f, amp=140, ori=-40) :
     #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
     value = f*amp+ori
-
     #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
     factor = (259*(value+255))/(255*(259-value))
-
     aux = img.astype('double')
     aux = factor*(aux-128) + 128
     aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
-
     img = aux.astype('uint8')
-
     return img
 
 #same as contrastF acting only on the value channel
-def contrastValueF(img, f, amp=100, ori=-50) :
+def contrastValueF(img, f, amp=70, ori=0) :
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
-
     #map f, in [0,1], to a new interval defined by amp(litude) and ori(gin)
     value = f*amp+ori
-
     #From https://www.dfstudios.co.uk/articles/programming/image-programming-algorithms/image-processing-algorithms-part-5-contrast-adjustment/
     factor = (259*(value+255))/(255*(259-value))
-
     aux = img[:,:,2].astype('double')
     aux = factor*(aux-128) + 128
     aux = (aux>=0)*(aux<=255)*aux + (aux>255)*255
     img[:,:,2] = aux.astype('uint8')
-
     img = cv2.cvtColor(img,cv2.COLOR_HSV2BGR)
-
     return img
 
+#redo next filter, the image should be unchanged with f=0
+#using this technique you can only desaturate (and it does not make a lot of sense)
 def saturationF(img, f, force=[0.7,1]) :
     f=f*(force[1]-force[0])+force[0]
     img = cv2.cvtColor(img,cv2.COLOR_BGR2HSV)
@@ -357,17 +432,29 @@ def noiseF(img, f, top=0.2, mean=0):
     out = out+img
     return out
 
-def equalizationF(img, f, top=1, space='RGB', gamma=0):
-    #tran could be calculated only once if passed as argument (for still images)___________
+def equalizationF(img, f, top=1, space='RGB'):
+    f = f*top #top in (0,1]: the lower the softer the effect
     if space=='HSV':
         tran = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
     else:
         tran = img.copy()
-
     for i in range(3):
         tran[:,:,i] = cv2.equalizeHist(tran[:,:,i])
-    #_____________________________________________________________________________________
-    img = cv2.addWeighted(img,1-f,tran,f,gamma)
+    if space=='HSV':
+        tran = cv2.cvtColor(tran, cv2.COLOR_HSV2BGR)
+    return cv2.addWeighted(img,1-f,tran,f,0)
+
+#next is designed to be used with picth and modulated by volume
+#curve of colors mechanism still under construction
+def colorF(img,f,color=(228,173,44)):
+    color = [color[2],color[1],color[0]]    #opencv works in bgr
+    #testing some idea________________________
+    color[0] = 25 + f*(44-25)
+    color[1] = 230 + f*(173-230)
+    color[2] = 60 + f*(288-60)
+    #_________________________________________
+    for i in range(3):
+        img[:,:,i] = cv2.addWeighted(img[:,:,i],0.5,color[i],0.5,0,dtype=8)
     return img
 
 def posterizeF(img, f, top=30):
@@ -383,7 +470,7 @@ def posterizeF(img, f, top=30):
 
 #--------------------Orders-----------------------------------------
 order = namedtuple('order', ['driver', 'filter', 'mask', 'modulator'])
-#next define defaults only for mask and modulator, driver and filter are mandatory
+#next lines define defaults only for mask and modulator, driver and filter are mandatory
 order.__new__.__defaults__=(None,None)      #it starts asigning from latest variable
 #-------------------------------------------------------------------
 
