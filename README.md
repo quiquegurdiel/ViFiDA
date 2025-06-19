@@ -1,5 +1,5 @@
 ************************************************
-#ViFiDA - Video Filtering Driven by Audio
+# ViFiDA - Video Filtering Driven by Audio
 ************************************************
 
 This is a repository to allow for digital image procesing of videos based on the perceptive properties of the audio that plays along. It is under development and with very few functionalities working at the moment.
