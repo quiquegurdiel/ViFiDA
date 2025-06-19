@@ -1,12 +1,15 @@
 import numpy as np
 import soundfile as sf
-import moviepy.editor as mp
-from cv2 import cv2
+#import moviepy.editor as mp
+import moviepy as mp
+#from cv2 import cv2
+import cv2
 import math
 import sys
 import os
 import matplotlib.pyplot as plt
 from skimage import filters, color, util
+#from scikit-image import filters, color, util
 from collections import namedtuple
 import aubio as au
 
@@ -119,6 +122,65 @@ def combineMasks(mask1,mask2):
 
 def applyMask(filtered,original,mask):
     return cv2.add( cv2.multiply(filtered,mask,dtype=8) , cv2.multiply(original,(1-mask),dtype=8) )
+
+def writeFVideoFromVideo(tempfilepath, infilepath, duration, framerate, orders, globalMask=None):
+    isGloballyMasked = not globalMask is None
+    isAnyStereo = False
+    for i in range(len(orders)):
+        isAnyStereo = ( isAnyStereo or isStereoOrder(orders[i]) )
+    if isAnyStereo:
+        stereoOrders=list()
+        for i in range(len(orders)):
+            stereoOrders.append(forceStereoOrder(orders[i]))
+        if isGloballyMasked:
+            sys.exit(1)
+        else:
+            sys.exit(1)
+    else:
+        if isGloballyMasked:
+            sys.exit(1)
+        else:
+            writeFVideoFromVideoMono(tempfilepath, infilepath, duration, framerate, orders)
+    return 0
+
+def writeFVideoFromVideoMono(tempfilepath, infilepath, duration, framerate, orders):
+    vidcap = cv2.VideoCapture(infilepath)
+    success,img = vidcap.read()
+    height, width = img.shape[0:2]
+    framecount = math.ceil(duration*framerate)
+    cvcodec = cv2.VideoWriter_fourcc(*'avc1')
+    video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))
+    i=0
+    while success:
+        thisOriginal = img.copy()
+        thisFiltered = img.copy()
+        for j in range(len(orders)):    #j iterates over orders
+            thatOrder = orders[j]
+            thatDriver = getattr(thatOrder, 'driver' )
+            thatFilter = getattr(thatOrder, 'filter' )
+            isMasked = not (getattr(thatOrder, 'mask' ) is None)
+            isModulated = not (getattr(thatOrder, 'modulator' ) is None)
+            f = thatDriver[i]
+            thisFiltered = thatFilter(thisFiltered,f)
+            if isMasked & isModulated:
+                thatMask = getattr(thatOrder, 'mask' )
+                thatModulator = getattr(thatOrder, 'modulator' )
+                norm = 2*thatMask*thatModulator[i]+1-thatMask-thatModulator[i]
+                norm[norm==0] = 1 #avoid 0 division
+                aux = thatMask*thatModulator[i]/norm
+                thisFiltered = applyMask(thisFiltered,thisOriginal,aux)
+            elif isMasked:
+                thatMask = getattr(thatOrder, 'mask')
+                thisFiltered = applyMask(thisFiltered,thisOriginal,thatMask)
+            elif isModulated:
+                thatModulator = getattr(thatOrder, 'modulator')
+                thisFiltered = cv2.addWeighted(thisFiltered,thatModulator[i],thisOriginal,1-thatModulator[i],0)
+            thisOriginal = thisFiltered.copy()    #next filter acts over the filtered image
+        video.write(thisFiltered)
+        success,img = vidcap.read()
+        i=i+1
+    video.release()
+    return 0
 
 def writeFVideoFromImage(tempfilepath, infilepath, duration, framerate, orders, globalMask=None):
     isGloballyMasked = not globalMask is None
