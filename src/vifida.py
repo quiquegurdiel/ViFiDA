@@ -151,7 +151,7 @@ def writeFVideoFromVideoMono(tempfilepath, infilepath, duration, framerate, orde
     cvcodec = cv2.VideoWriter_fourcc(*'avc1')
     video = cv2.VideoWriter(tempfilepath,cvcodec,framerate,(width,height))
     i=0
-    while success:
+    while success and i<framecount:
         thisOriginal = img.copy()
         thisFiltered = img.copy()
         for j in range(len(orders)):    #j iterates over orders
